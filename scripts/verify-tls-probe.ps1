@@ -1,42 +1,10 @@
-﻿<#
-.SYNOPSIS
-    Reproduz LOCALMENTE, por US$ 0,00, o modo de falha nº 1 deste bloco: o `pg` do Node contra um
-    PostgreSQL que exige TLS.
-
-.DESCRIPTION
-    O RDS deste projeto tem `rds.force_ssl = 1` (parameter group default do Postgres 16, verificado
-    nesta instancia). O `pg` do Node nasce com `ssl: false` e leva RECUSA do servidor, com um erro que
-    parece security group:
-
-        no pg_hba.conf entry for host "10.0.x.x", user "postgres", database "oficina_db",
-        no encryption
-
-    O `verify-offline.ps1` roda com DB_SSL=disable contra o Postgres do compose — ou seja, deixa
-    justamente este caminho sem exercitar. Esta sonda fecha o buraco: sobe um Postgres descartável
-    que se comporta como o RDS e prova as DUAS direções.
-
-    Duas armadilhas de Windows que a mecânica evita:
-
-    * bind mount NÃO serve. O PostgreSQL recusa iniciar se a chave privada tiver permissão de grupo
-      ou de outros (`FATAL: private key file ... has group or world access`), e no Docker Desktop os
-      arquivos montados aparecem como root/0777 — nenhum chmod do host atravessa. Por isso o par vai
-      para dentro da IMAGEM, onde o chmod 600 vive numa layer.
-    * `ssl=on` sozinho não força nada. O pg_hba default da imagem aceita conexão em claro, e o
-      primeiro caso passaria quando deveria falhar. O pg_hba também é assado na imagem, só com
-      entradas `hostssl`, e apontado por `-c hba_file=`.
-
-.EXAMPLE
-    .\scripts\verify-tls-probe.ps1
-#>
-
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [int]$Port = 55432,
     [string]$ContainerName = "fase4-tls-probe"
 )
 
-# 'Continue', não 'Stop': no PS 5.1 o stderr de um executável nativo vira NativeCommandError, e o
-# progresso do `docker build` ou um aviso do Node derrubariam o script com o comando bem-sucedido.
+# 'Continue', nao 'Stop': no PS 5.1 o stderr de executavel nativo vira NativeCommandError.
 $ErrorActionPreference = "Continue"
 $script:Failed = $false
 
@@ -44,8 +12,7 @@ function Write-Head($text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan 
 function Write-Ok($text) { Write-Host "  [OK]   $text" -ForegroundColor Green }
 function Write-Fail($text) { Write-Host "  [FAIL] $text" -ForegroundColor Red; $script:Failed = $true }
 
-# `"$_"` converte cada ErrorRecord em string: sem isso um objeto de erro no array volta a se
-# comportar como erro mais adiante no pipeline.
+# "$_" converte cada ErrorRecord em string; sem isso ele volta a agir como erro adiante.
 function Invoke-Native {
     param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$NativeArgs)
     $ErrorActionPreference = "Continue"
@@ -60,9 +27,6 @@ New-Item -ItemType Directory -Force -Path $build | Out-Null
 
 Write-Head "1. Certificado self-signed para o servidor"
 
-# O Postgres precisa de um X.509, que o `node:crypto` nao emite — entao aqui o openssl e a
-# ferramenta certa. O cuidado e outro: resolver o caminho (o Git for Windows o esconde em `usr\bin`,
-# fora do PATH do PowerShell) e capturar o stderr, que e informativo mas vira NativeCommandError.
 $openssl = $null
 foreach ($candidate in @(
         "openssl.exe",
@@ -87,15 +51,13 @@ Write-Ok "server.crt / server.key gerados no scratchpad"
 
 Write-Head "2. Imagem descartavel que se comporta como o RDS"
 
-# Sem NENHUMA linha `host`: e o que faz o servidor recusar conexao em claro, igual ao rds.force_ssl.
-# A linha `local` fica porque o entrypoint da imagem inicializa o banco pelo socket unix.
+# Sem linha host: o servidor recusa conexao em claro, como o rds.force_ssl. A local fica para o entrypoint.
 @"
 local   all   all               trust
 hostssl all   all   all         scram-sha-256
 "@ | Set-Content -Path (Join-Path $build "pg_hba.conf") -Encoding ascii
 
-# COPY + chmod DENTRO da imagem: em bind mount do Docker Desktop no Windows os arquivos aparecem
-# como root/0777 e o Postgres recusa iniciar por "has group or world access". Na layer, funciona.
+# COPY + chmod na imagem: em bind mount do Docker Desktop o arquivo fica 0777 e o Postgres recusa iniciar.
 @"
 FROM postgres:16
 COPY server.crt server.key pg_hba.conf /etc/pg/
@@ -133,8 +95,7 @@ try {
             Write-Fail "o Postgres recusou a chave por permissao — a imagem nao aplicou o chmod"
             break
         }
-        # O entrypoint sobe um servidor TEMPORARIO durante a inicializacao e imprime a mesma linha;
-        # so a que vem depois de "ready for start up" e o servidor definitivo, ja com o nosso pg_hba.
+        # O entrypoint sobe um servidor temporario antes; so o que vem depois de "ready for start up" e o definitivo.
         if ($log -match "ready for start up" -and $log -match "database system is ready to accept connections") {
             $up = $true; break
         }
@@ -142,7 +103,6 @@ try {
     if (-not $up) { Write-Fail "servidor nao ficou pronto"; exit 1 }
     Write-Ok "postgres com ssl=on e pg_hba so-hostssl na porta $Port"
 
-    # Tabela minima que o handler consulta. `document` e o unico campo que importa para a sonda.
     $seed = Invoke-Native -Exe "docker" -NativeArgs @(
         "exec", $ContainerName, "psql", "-U", "postgres", "-d", "oficina_db", "-c",
         "CREATE TABLE customers (id int8 PRIMARY KEY, document varchar(255), name varchar(255)); INSERT INTO customers VALUES (2, '98765432100', 'Maria Santos');")

@@ -13,8 +13,6 @@ output "app_endpoint" {
   value       = "${aws_apigatewayv2_api.main.api_endpoint}/carworkshop/v1"
 }
 
-# Conferir DEPOIS do apply: se este hostname não for o ELB desta sessão, o /{proxy+} devolve 503 e
-# o parâmetro obsoleto do repo 4 é a causa.
 output "proxied_lb_dns" {
   description = "Hostname do LoadBalancer para onde o /{proxy+} aponta, como lido do SSM no apply."
   value       = local.lb_dns

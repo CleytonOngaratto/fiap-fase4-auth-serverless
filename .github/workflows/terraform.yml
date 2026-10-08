@@ -1,21 +1,6 @@
-# pull_request para main -> fmt-validate                   (node test + fmt -check + init -backend=false + validate)
-# push na main           -> fmt-validate                   (merge que só mexe em .md não roda)
-# workflow_dispatch      -> fmt-validate, depois plan | apply | destroy
-#
-# fmt-validate não usa credencial do lab: é o job que pode ser check obrigatório do PR. O job
-# `terraform` depende da sessão do Learner Lab e do contrato dos outros repos e, até o gatilho de apply
-# ser definido junto com a borda, roda só por workflow_dispatch.
-#
-# 🔴 As credenciais do AWS Academy são TEMPORÁRIAS (~4h) e incluem session token. O job `terraform`
-#    FALHA quando a sessão do lab expira, e isso é esperado — não o transforme em status check
-#    obrigatório no ruleset, ou todo merge fora do horário do laboratório fica travado.
-
 name: Terraform - Auth Serverless (Lambda + API Gateway)
 
-# O pull_request NÃO tem filtro de caminho: fmt-validate é check obrigatório, e um workflow pulado por
-# filtro de caminho deixa o check obrigatório "Pending" para sempre, travando o merge (doc do GitHub,
-# "Troubleshooting required status checks"). No push o filtro continua: merge que só mexe em documentação
-# não roda Terraform. ⚠️ O filtro é tudo-ou-nada: um único arquivo fora de `**.md` faz o workflow rodar.
+# Sem paths-ignore no pull_request: workflow pulado por filtro deixa o check obrigatório "Pending" e trava o merge.
 on:
   pull_request:
     branches: [ "main" ]
@@ -40,7 +25,6 @@ env:
   NODE_VERSION: "20"
 
 jobs:
-  # Sem credencial e sem backend: testes da Lambda, formatação, sintaxe e tipos em todo PR.
   fmt-validate:
     runs-on: ubuntu-latest
     defaults:
@@ -56,8 +40,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # Não há devDependencies: --omit=dev também instala tudo o que os testes precisam (o runner de
-      # testes é o do próprio Node).
       - name: Install Lambda dependencies
         run: npm ci --omit=dev --prefix lambda
 
@@ -80,8 +62,6 @@ jobs:
         run: terraform validate
 
   terraform:
-    # Só manual (ver o cabeçalho). As condições dos steps abaixo continuam prontas para o push na main
-    # quando o gatilho de apply voltar.
     if: github.event_name == 'workflow_dispatch'
     needs: fmt-validate
     runs-on: ubuntu-latest
@@ -89,11 +69,8 @@ jobs:
       run:
         shell: bash
 
-    # No job, e não no workflow: assim um apply em curso não enfileira nem cancela o fmt-validate de um
-    # PR. Dois runs simultâneos deste job disputam o lock do state no S3 e um morre com "Error acquiring
-    # the state lock" — cenário real num Re-run disparado enquanto o apply anterior ainda espera a ENI da
-    # Lambda ficar Active. Sem cancel-in-progress: abortar um apply no meio deixa recursos criados fora
-    # do state, que é pior que esperar.
+    # No job, não no workflow: um apply em curso não pode enfileirar nem cancelar o fmt-validate de um PR.
+    # Sem cancel-in-progress: abortar um apply no meio deixa recursos fora do state.
     concurrency:
       group: terraform-auth-serverless
       cancel-in-progress: false
@@ -110,10 +87,7 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # O action acima valida as credenciais ele mesmo (chama sts:GetCallerIdentity para mascarar o
-      # account id), então com o token expirado ele falha ANTES de qualquer step nosso. Um
-      # `if: failure()` aqui é o único lugar onde a mensagem acionável ainda alcança o cenário para o
-      # qual foi escrita. Nos repos 2 e 3 este step vem DEPOIS do action e nunca é executado.
+      # Só funciona logo após o configure-aws-credentials: com token expirado ele falha antes de qualquer outro step.
       - name: Lab session expirada?
         if: failure()
         run: |
@@ -121,13 +95,9 @@ jobs:
           echo "::error::Abra o lab, atualize ~/.aws/credentials e recole os 3 secrets deste repo."
           echo "::error::O AWS_SESSION_TOKEN e obrigatorio; sem ele o erro vem como InvalidClientTokenId."
 
-      # Cobre o caso que o action não cobre: token válido, mas sem permissão.
       - name: Check lab session
         run: aws sts get-caller-identity
 
-      # `vars.` é repository VARIABLE, não secret — mora em outra aba das configurações e é por
-      # repositório, então não vem junto com os 3 secrets do lab. Sem esta guarda o `init` receberia
-      # `bucket=` vazio e falharia com erro de backend, longe da causa real.
       - name: Check repository variables
         run: |
           if [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
@@ -137,7 +107,6 @@ jobs:
             exit 1
           fi
 
-      # Este repositório é o ÚLTIMO da ordem (2 -> 3 -> 4 -> 1) e consome o contrato dos três.
       - name: Check upstream contract (SSM)
         if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
         run: |
@@ -162,16 +131,11 @@ jobs:
             exit 1
           fi
 
-      # 🔴 A armadilha central deste bloco. O /fase4/eks/lb-dns é publicado pelo cd.yml do repo 4, por
-      #    NENHUM Terraform — então nenhum destroy o apaga, e ele sobrevive entre sessões apontando
-      #    para um ELB que já morreu. O apply passaria e o ANY /{proxy+} nasceria devolvendo 503: o
-      #    parâmetro EXISTIR faz parecer que está tudo certo. Sondar o ELB é o que decide.
       - name: Check EKS LoadBalancer is alive
         if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
         run: |
           set -euo pipefail
-          # Captura antes de fatiar: num `read` alimentado por process substitution o status do
-          # `aws` se perde, e o step seguiria com a variavel vazia como se tivesse dado certo.
+          # Captura antes de fatiar: num read com process substitution o status do aws se perde.
           if ! raw=$(aws ssm get-parameter --name /fase4/eks/lb-dns \
                --query "Parameter.[Value,LastModifiedDate]" --output text 2>/dev/null); then
             echo "::error::/fase4/eks/lb-dns ausente. Rode o workflow_dispatch do cd.yml no repo 4."
@@ -190,9 +154,6 @@ jobs:
           fi
           echo "LoadBalancer respondeu 200 — o proxy vai apontar para algo vivo."
 
-      # Mesmo check, outra mensagem: no destroy, parâmetro ausente significa que os repos anteriores
-      # já caíram, e mandar "aplique o repo 2 primeiro" para quem está derrubando induz a subir infra
-      # cara.
       - name: Check contract on destroy
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
         run: |
@@ -210,10 +171,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      # 🔴 ANTES do Terraform, sempre. O archive_file empacota o que está no disco: sem este step o
-      #    zip sai sem pg/jsonwebtoken/@aws-sdk, o apply fica VERDE e a função quebra na primeira
-      #    invocação com `Cannot find module`. Não há devDependencies, então --omit=dev também
-      #    instala tudo o que os testes precisam (o runner de testes é o do próprio Node).
+      # Antes do Terraform: o archive_file empacota o disco, e sem node_modules a função quebra em runtime.
       - name: Install Lambda dependencies
         run: npm ci --omit=dev --prefix lambda
 
@@ -262,7 +220,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
         run: terraform destroy -auto-approve
 
-      # Fecha o loop da armadilha do lb-dns: prova, com o recurso já criado, que a borda responde.
       - name: Smoke test the API Gateway
         if: |
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
@@ -271,15 +228,11 @@ jobs:
           set -euo pipefail
           api=$(terraform output -raw api_endpoint)
 
-          # 400 e a resposta CERTA aqui: prova que o Gateway roteou para a Lambda e que ela executou.
-          # Um CPF valido dependeria do seed do RDS; um invalido so depende do codigo.
           code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' -X POST "$api/auth" \
                  -H 'content-type: application/json' -d '{"cpf":"12345678901"}')
           echo "POST /auth com CPF invalido -> $code (esperado 400)"
           [ "$code" = "400" ]
 
-          # 401 prova que o /{proxy+} alcancou a app e que ela recusou a requisicao sem token — ou
-          # seja, a integracao HTTP esta viva. 503 aqui seria o lb-dns obsoleto.
           code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' "$api/carworkshop/v1/tracking/1")
           echo "GET /tracking/1 sem token pelo Gateway -> $code (esperado 401)"
           [ "$code" = "401" ]

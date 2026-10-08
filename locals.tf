@@ -7,12 +7,10 @@ locals {
     Repo      = "fiap-fase4-auth-serverless"
   }
 
-  # O provider marca TODO `aws_ssm_parameter` como sensitive, inclusive String comum: sem
-  # `nonsensitive()` o plan esconde `integration_uri` e `DB_HOST` atrás de "(sensitive value)" —
-  # justamente os campos que denunciam um lb-dns obsoleto — e o output `proxied_lb_dns` nem compila.
+  # nonsensitive(): o provider marca todo aws_ssm_parameter como sensitive e o plan esconderia estes valores.
   vpc_id          = nonsensitive(data.aws_ssm_parameter.vpc_id.value)
   vpc_cidr        = nonsensitive(data.aws_ssm_parameter.vpc_cidr.value)
-  private_subnets = split(",", nonsensitive(data.aws_ssm_parameter.private_subnets.value)) # StringList vem como CSV
+  private_subnets = split(",", nonsensitive(data.aws_ssm_parameter.private_subnets.value))
 
   rds_host      = nonsensitive(data.aws_ssm_parameter.rds_endpoint.value)
   rds_port      = nonsensitive(data.aws_ssm_parameter.rds_port.value)

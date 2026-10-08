@@ -1,6 +1,4 @@
-// Espelho de CustomerDomainValidator.isValidCpf (repo 4), inclusive por não normalizar pontuação:
-// divergir faria a app aceitar um documento que esta função recusa, e o cliente existiria no banco
-// sem conseguir token.
+// Espelho de CustomerDomainValidator.isValidCpf, inclusive sem normalizar pontuação: divergir quebra o login.
 
 const ELEVEN_DIGITS = /^\d{11}$/;
 const ALL_SAME_DIGIT = /^(\d)\1{10}$/;
@@ -22,7 +20,6 @@ export function isValidCpf(cpf) {
   return digits[9] === checkDigit(digits, 9) && digits[10] === checkDigit(digits, 10);
 }
 
-// CPF é dado pessoal: dois dígitos bastam para casar um log com a requisição que o cliente relatou.
 export function maskCpf(cpf) {
   return typeof cpf === "string" && cpf.length === 11 ? `*********${cpf.slice(-2)}` : "***";
 }

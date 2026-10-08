@@ -21,8 +21,6 @@ function readCpf(event) {
   }
   if (typeof parsed?.cpf !== "string") return null;
 
-  // `""` volta como ausência, não como CPF inválido: o campo não foi preenchido, e a distinção
-  // entre "faltou o campo" e "o documento está errado" é o que o contrato de resposta promete.
   const trimmed = parsed.cpf.trim();
   return trimmed === "" ? null : trimmed;
 }
@@ -34,8 +32,7 @@ export const handler = async (event) => {
     return json(400, { error: "invalid_request", message: "Body must be JSON with a 'cpf' field." });
   }
   if (!isValidCpf(cpf)) {
-    // 400 e não 404: o documento é inválido em si, e responder "não encontrado" para um CPF que
-    // nunca poderia existir transformaria este endpoint num oráculo de quais CPFs estão cadastrados.
+    // 400 e não 404: responder "não encontrado" para CPF impossível vira oráculo de CPFs cadastrados.
     console.warn(JSON.stringify({ event: "cpf_rejected", cpf: maskCpf(cpf) }));
     return json(400, { error: "invalid_cpf", message: "CPF check digits are invalid." });
   }
@@ -46,7 +43,6 @@ export const handler = async (event) => {
     const customer = await findCustomerByDocument(pool, cpf);
 
     if (!customer) {
-      // 404, não 401: nada foi rejeitado por falta de credencial — o recurso é que não existe.
       console.info(JSON.stringify({ event: "customer_not_found", cpf: maskCpf(cpf) }));
       return json(404, { error: "customer_not_found", message: "No customer with this CPF." });
     }
@@ -67,8 +63,6 @@ export const handler = async (event) => {
       expires_in: config.jwt.ttlSeconds,
     });
   } catch (error) {
-    // No CloudWatch: `AccessDeniedException` aqui é permissão da execution role (SSM/KMS), enquanto
-    // um timeout seria NAT ou security group.
     console.error(JSON.stringify({ event: "internal_error", message: error.message }));
     return json(500, { error: "internal_error" });
   }

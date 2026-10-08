@@ -1,5 +1,3 @@
-# 🔴 O zip é montado do que está NO DISCO no momento do plan: sem `npm ci --omit=dev --prefix lambda`
-# antes, o apply fica verde e a função quebra com `Cannot find module`. O preflight e o CI guardam.
 data "archive_file" "lambda" {
   type        = "zip"
   source_dir  = "${path.module}/lambda"
@@ -19,8 +17,6 @@ resource "aws_security_group" "lambda" {
   tags = { Name = "${local.name}-lambda" }
 }
 
-# Em subnet privada, esta saída depende do NAT do repo 2 (`enable_nat_gateway`, default true). Com o
-# modo econômico ligado lá, a função morre por TIMEOUT no cold start — que parece lentidão, não rota.
 resource "aws_vpc_security_group_egress_rule" "lambda_https" {
   security_group_id = aws_security_group.lambda.id
   cidr_ipv4         = "0.0.0.0/0"
@@ -30,11 +26,6 @@ resource "aws_vpc_security_group_egress_rule" "lambda_https" {
   description       = "SSM (chave RSA e senha do RDS) via NAT"
 }
 
-# Explícitas por documentação, não por necessidade: o security group NÃO filtra tráfego para o
-# resolver da VPC, e está medido — a função resolveu SSM e RDS no primeiro cold start (890 ms), antes
-# destas regras existirem. Ficam porque tornam a dependência de DNS visível a custo zero, e porque
-# dão ao `/fase4/vpc/cidr` do repo 2 o primeiro consumidor. UDP é o transporte normal; TCP entra
-# quando a resposta não cabe num datagrama.
 resource "aws_vpc_security_group_egress_rule" "lambda_dns_udp" {
   security_group_id = aws_security_group.lambda.id
   cidr_ipv4         = local.vpc_cidr
@@ -67,8 +58,7 @@ resource "aws_lambda_function" "auth" {
   memory_size = var.lambda_memory_size
   timeout     = var.lambda_timeout
 
-  # `reserved_concurrent_executions` é impossível aqui: a AWS recusa reserva que deixe a conta com
-  # menos de 100 de concorrência não-reservada, e o teto do Learner Lab é 10.
+  # Sem reserved_concurrent_executions: a AWS exige 100 de concorrência livre e o teto do lab é 10.
 
   vpc_config {
     subnet_ids         = local.private_subnets
@@ -81,20 +71,17 @@ resource "aws_lambda_function" "auth" {
       DB_PORT = local.rds_port
       DB_NAME = local.rds_db_name
       DB_USER = local.rds_username
-      # `rds.force_ssl = 1` no parameter group default: sem isto o servidor recusa a conexão.
-      DB_SSL = "require"
+      DB_SSL  = "require"
 
       JWT_ISSUER      = var.jwt_issuer
       JWT_TTL_SECONDS = tostring(var.jwt_ttl_seconds)
 
-      # Só os nomes: chave privada em env var apareceria no console e na captura de ambiente de
-      # qualquer agente. A função lê os valores em runtime, cifrados.
+      # Só os nomes: chave privada em env var aparece no console. A função lê os valores cifrados em runtime.
       JWT_PRIVATE_KEY_PARAM = local.jwt_private_key_param
       DB_PASSWORD_PARAM     = local.rds_password_param
     }
   }
 
-  # Sem isto a função cria o log group sozinha na primeira invocação, com retenção infinita, e o
-  # recurso acima passa a conflitar com um que já existe.
+  # Sem isto a função cria o log group antes, com retenção infinita, e o recurso acima conflita.
   depends_on = [aws_cloudwatch_log_group.lambda]
 }

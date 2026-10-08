@@ -1,15 +1,8 @@
-// Fora de `lambda/` de propósito: aquele diretório é EXATAMENTE o que o archive_file empacota.
-// Teste não vai para produção, e assim o zip não precisa de regra de exclusão para ficar limpo.
-
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import { isValidCpf, maskCpf } from "../lambda/cpf.mjs";
 
-// Os CPFs do seed do V1.0.0__oficina.sql foram inseridos por SQL, contornando o validador do
-// domínio — então DOIS dos três clientes semeados têm dígitos verificadores inválidos. Sem saber
-// disso, o caminho feliz é testado com o CPF do "John Silva", volta 400, e a caça ao bug começa
-// numa função que está certa.
 test("CPFs do seed: só o da Maria Santos tem dígitos válidos", () => {
   assert.equal(isValidCpf("98765432100"), true, "Maria Santos — caminho feliz");
   assert.equal(isValidCpf("12345678901"), false, "John Silva — semeado inválido");
@@ -36,11 +29,7 @@ test("rejeita dígitos repetidos, que passam na aritmética mas não são CPF", 
 });
 
 test("cobre o ramo `check >= 10 -> 0`, que o caminho feliz por acaso exercita", () => {
-  // Medido, não suposto: em 98765432100 o resto é 0 no primeiro dígito e 1 no segundo, ou seja
-  // `11 - resto` daria 11 e 10 — os DOIS dígitos saem do ramo que mapeia para 0. Sem essa regra do
-  // Java, o CPF do caminho feliz do projeto falharia na validação.
   assert.equal(isValidCpf("98765432100"), true);
-  // Contraprova pelo ramo normal (restos 8 e 6), para o teste acima não passar por acidente.
   assert.equal(isValidCpf("11144477735"), true);
 });
 

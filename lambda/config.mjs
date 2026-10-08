@@ -1,6 +1,3 @@
-// Segredo não entra em variável de ambiente: lá a chave privada apareceria no console da função e na
-// captura de ambiente de qualquer agente. Só o NOME do parâmetro vem por env; o valor é lido cifrado.
-
 import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 
 const num = (value, fallback) => (value ? Number(value) : fallback);
@@ -11,7 +8,6 @@ export const config = {
     port: num(process.env.DB_PORT, 5432),
     database: process.env.DB_NAME,
     user: process.env.DB_USER,
-    // Único ponto em que local e nuvem divergem de comportamento. Espelha o DB_SSLMODE da app.
     ssl: process.env.DB_SSL ?? "require",
   },
   jwt: {
@@ -22,8 +18,7 @@ export const config = {
     privateKey: process.env.JWT_PRIVATE_KEY_PARAM,
     dbPassword: process.env.DB_PASSWORD_PARAM,
   },
-  // O Terraform NUNCA preenche estes: existem para o harness local rodar o handler sem um parâmetro
-  // que só existe com o repo 3 aplicado, e são o plano B se a LabRole não tiver `kms:Decrypt`.
+  // Só o harness local preenche: o Terraform nunca define DB_PASSWORD nem JWT_PRIVATE_KEY.
   overrides: {
     privateKey: process.env.JWT_PRIVATE_KEY,
     dbPassword: process.env.DB_PASSWORD,
@@ -46,8 +41,7 @@ async function fetchSecrets() {
     new GetParametersCommand({ Names: wanted.map((e) => e.name), WithDecryption: true })
   );
 
-  // Parâmetro ausente não é erro da API: volta em InvalidParameters, com HTTP 200. Sem esta checagem
-  // a função seguiria com a chave `undefined` e falharia na assinatura, longe da causa.
+  // Parâmetro ausente volta em InvalidParameters com HTTP 200, não como erro.
   if (response.InvalidParameters?.length) {
     throw new Error(`Parametros ausentes no SSM: ${response.InvalidParameters.join(", ")}`);
   }
@@ -60,7 +54,7 @@ async function fetchSecrets() {
 
 export function loadSecrets() {
   cached ??= fetchSecrets().catch((error) => {
-    cached = undefined; // um erro transitório no cold start não pode envenenar o container inteiro
+    cached = undefined;
     throw error;
   });
   return cached;

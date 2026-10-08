@@ -1,36 +1,11 @@
-﻿<#
-.SYNOPSIS
-    De-risca o contrato do token SEM subir nada na AWS — custo US$ 0,00.
-
-.DESCRIPTION
-    O risco caro deste bloco é o token da Lambda ser recusado pelo SmallRye da aplicação. Isso não
-    tem nada a ver com nuvem: dá para provar contra a app rodando no docker compose. Se passar aqui,
-    o que resta na nuvem é rede (VPC/subnet/SG/NAT) e permissão da execution role — dois problemas
-    separados do terceiro, de graça.
-
-    O que este script faz, nesta ordem:
-      1. sobe a app + Postgres pelo docker-compose do repo 4;
-      2. confere que a chave PRIVADA do SSM é o par da PÚBLICA que a app monta — sem isso o teste
-         inteiro seria sobre o par errado e não provaria nada;
-      3. roda o handler REAL da Lambda (scripts/invoke-local.mjs) contra o Postgres do compose;
-      4. joga o token resultante na app e confere 401 / 404 / 200.
-
-.EXAMPLE
-    .\scripts\verify-offline.ps1
-    .\scripts\verify-offline.ps1 -SkipCompose      # a app já está de pé
-#>
-
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [string]$Cpf = "98765432100", # Maria Santos: o ÚNICO cliente do seed com dígitos válidos
+    [string]$Cpf = "98765432100",
     [string]$Region = "us-east-1",
     [switch]$SkipCompose
 )
 
-# 'Continue', não 'Stop' (mesmo padrão dos preflights dos repos 2/3): no PS 5.1 o stderr de um
-# executável nativo vira NativeCommandError, e com 'Stop' qualquer aviso informativo — o "writing RSA
-# key" do openssl, o NodeVersionSupportWarning do AWS SDK, o progresso do docker build — derruba o
-# script com um comando que funcionou. Cada passo aqui é conferido explicitamente por Write-Fail.
+# 'Continue', nao 'Stop': no PS 5.1 o stderr de executavel nativo vira NativeCommandError.
 $ErrorActionPreference = "Continue"
 $script:Failed = $false
 $AppRoot = "http://localhost:8080/carworkshop/v1"
@@ -47,9 +22,7 @@ function Invoke-Probe {
     return $out
 }
 
-# Quando a saída E o código de saída importam (o Invoke-Probe descarta os dois em caso de falha, e
-# aqui a falha é justamente o que se quer reportar). O `"$_"` converte cada ErrorRecord em string:
-# sem isso um objeto de erro no array volta a se comportar como erro mais adiante.
+# "$_" converte cada ErrorRecord em string; sem isso ele volta a agir como erro adiante.
 function Invoke-Native {
     param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string[]]$NativeArgs)
     $ErrorActionPreference = "Continue"
@@ -57,15 +30,8 @@ function Invoke-Native {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Lines = @($out) }
 }
 
-# `curl` no PS 5.1 é alias de Invoke-WebRequest: sempre curl.exe.
-# Corpo e status na MESMA chamada, separados por um marcador — duas chamadas seriam duas requisições
-# diferentes, e num teste de autorização isso esconderia corrida.
-#
-# 🔴 O corpo vai por ARQUIVO (`-d "@caminho"`), nunca inline. O PS 5.1 remove as aspas duplas ao
-# montar a linha de comando de um executável nativo: `{"username":"x"}` chega ao curl como
-# `{username:x}`, que a app recusa com 400 — e o sintoma parece regra de negócio, não quoting.
-# (Medido: httpbin devolveu `"data": "{username:probe-x,...}"`.) O `@arquivo` não tem aspas para
-# manglar. Mesma família da armadilha do `--from-literal` registrada no deploy.
+# curl.exe: no PS 5.1 "curl" e alias de Invoke-WebRequest.
+# Corpo por arquivo (-d "@caminho"): o PS 5.1 remove as aspas de argumento nativo e o JSON chega quebrado.
 function Invoke-Api {
     param(
         [Parameter(Mandatory)][string]$Method,
@@ -103,8 +69,7 @@ if (-not (Test-Path $appRepo)) { Write-Host "  Repo 4 nao encontrado em $appRepo
 if (-not $SkipCompose) {
     Push-Location $appRepo
     try {
-        # --build de proposito: sem ele o compose sobe a imagem VELHA e a sessao inteira testa outro
-        # artefato. Armadilha ja registrada no projeto.
+        # --build: sem ele o compose sobe a imagem velha.
         $compose = Invoke-Native -Exe "docker" -NativeArgs @("compose", "up", "--build", "-d")
         if ($compose.ExitCode -ne 0) {
             Write-Fail "docker compose falhou — o Docker Desktop esta rodando?"
@@ -126,23 +91,17 @@ else { Write-Fail "app nao ficou pronta"; exit 1 }
 
 Write-Head "2. A chave do SSM e o par da que a app valida?"
 
-# Sem esta conferencia o teste poderia rodar sobre pares diferentes e "provar" um contrato que na
-# nuvem nao vale. Compara os MODULOS: a publica derivada da privada do SSM tem que bater com a
-# publica que o compose monta em /deployments/secrets.
 $scratch = Join-Path $env:TEMP "fase4-bloco5"
 New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 $privPath = Join-Path $scratch "private-from-ssm.pem"
 
-# O AWS CLI no Windows traduz LF->CRLF na saida: sem o -replace o PEM chega com 29 `\r`, e o openssl
-# (como o jsonwebtoken) recusa a chave com erro que parece falta de permissao.
+# O AWS CLI no Windows devolve CRLF, e o openssl recusa o PEM com \r.
 $priv = ((Invoke-Probe -Exe "aws" -ProbeArgs @(
             "ssm", "get-parameter", "--name", "/fase4/jwt/private-key", "--with-decryption",
             "--region", $Region, "--query", "Parameter.Value", "--output", "text")) -join "`n") -replace "`r", ""
 if (-not $priv) { Write-Fail "nao consegui ler /fase4/jwt/private-key do SSM"; exit 1 }
 [System.IO.File]::WriteAllText($privPath, $priv)
 
-# Fingerprint em Node, nao em openssl: o Git for Windows esconde o openssl em usr\bin (fora do PATH
-# do PowerShell) e o stderr informativo dele vira NativeCommandError sob $ErrorActionPreference.
 $fromSsm = (Invoke-Probe -Exe "node" -ProbeArgs @((Join-Path $PSScriptRoot "key-fingerprint.mjs"), $privPath)) -join ""
 $fromApp = (Invoke-Probe -Exe "node" -ProbeArgs @((Join-Path $PSScriptRoot "key-fingerprint.mjs"), (Join-Path $appRepo "secrets/publicKey.pem"))) -join ""
 
@@ -156,9 +115,6 @@ else {
 
 Write-Head "3. Handler da Lambda (codigo real) contra o Postgres do compose"
 
-# A chave NAO vai por override: o handler a busca no SSM sozinho, exercitando o mesmo caminho de
-# leitura cifrada da nuvem. So a senha do banco vem por override, porque /fase4/rds/password so
-# existe com o repo 3 aplicado.
 $env:DB_PASSWORD = "postgres"
 $env:DB_SSL = "disable"
 $env:AWS_REGION = $Region
@@ -184,8 +140,7 @@ $noToken = Invoke-Api -Method GET -Path "/tracking/1"
 if ($noToken.Status -eq "401") { Write-Ok "sem token -> 401 (a rota esta protegida)" }
 else { Write-Fail "sem token -> $($noToken.Status), esperado 401" }
 
-# 404 aqui e SUCESSO: significa que o token passou pela validacao (assinatura, issuer, groups) e a
-# requisicao chegou ao interactor, que nao achou a OS. 401 seria token recusado; 403, grupo errado.
+# 404 aqui e sucesso: o token passou na validacao e o interactor nao achou a OS.
 $withToken = Invoke-Api -Method GET -Path "/tracking/1" -Token $token
 if ($withToken.Status -eq "404") { Write-Ok "com token -> 404 'Work Order not found' = TOKEN ACEITO" }
 elseif ($withToken.Status -eq "401") { Write-Fail "com token -> 401: o SmallRye RECUSOU o token. E este o bug que o bloco existe para evitar." }
@@ -194,13 +149,8 @@ else { Write-Fail "com token -> $($withToken.Status) ($($withToken.Body))" }
 
 Write-Head "5. O 200 do Definition of Done"
 
-# O seed do V1.0.0 NAO tem work_orders — nem local, nem no RDS da nuvem. Sem criar uma, o
-# /tracking/{id} devolve 404 para sempre e o DoD parece nao fechar.
 $admin = "dod-5"
 $password = "S3nh4Forte!"
-# Todo `destroy` do repo 3 zera os usuarios da app, entao o admin nasce a cada sessao. Numa reexecucao
-# ele ja existe: o signup nao-201 e informativo, e quem decide e o login logo abaixo. O que NAO se
-# tolera aqui e engolir o status — foi tolerar 400 no signup que escondeu o bug de quoting do PS.
 $signup = Invoke-Api -Method POST -Path "/auth/signup" -Body (@{username = $admin; password = $password; roles = @("ADMIN") } | ConvertTo-Json -Compress)
 if ($signup.Status -eq "201") { Write-Ok "admin '$admin' criado" }
 else { Write-Host "  [INFO] signup -> $($signup.Status) (provavelmente ja existe); o login decide" -ForegroundColor DarkGray }
