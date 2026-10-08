@@ -1,51 +1,84 @@
-# Estado do Terraform — NUNCA versionar (contém tudo em texto plano).
+# ============================================================================
+# .gitignore — borda da Fase 4 (Terraform + Lambda Node.js)
+# Regra: comentário sempre em linha própria — no .gitignore, texto depois de um
+# padrão faz parte do padrão.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Terraform — state e artefatos (NUNCA versionar: contêm tudo em texto plano)
+# ---------------------------------------------------------------------------
 *.tfstate
 *.tfstate.*
-
-# Diretório de trabalho / providers baixados.
+.terraform.tfstate.lock.info
 .terraform/
-
-# Config do backend: depende da conta do Learner Lab (gerada por bootstrap-backend.ps1 no repo de plataforma).
-backend.hcl
-
-# Valores locais. O terraform.tfvars.example É versionado (não casa este padrão) e serve de molde.
-terraform.tfvars
-*.auto.tfvars
-
-# Planos salvos e crash logs.
+# Planos salvos carregam um retrato do state (IDs de conta, endpoints). "tfplan*" cobre também
+# nomes como tfplan.repo1 — na Fase 3 um desses chegou a ser versionado por engano.
 *.tfplan
-tfplan
+tfplan*
 crash.log
 crash.*.log
+# Config do backend: depende da conta do Learner Lab (gerada pelo bootstrap do repo de plataforma).
+backend.hcl
+# Valores locais. O terraform.tfvars.example É versionado (não casa estes padrões) e serve de molde.
+terraform.tfvars
+*.auto.tfvars
+*.tfvars.json
+# Overrides locais e config da CLI (pode conter token).
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# O .terraform.lock.hcl é versionado de propósito: o CI resolve os mesmos providers da máquina.
 
-# O .terraform.lock.hcl NÃO entra aqui de propósito: ele é versionado para o CI resolver
-# exatamente os mesmos providers que a máquina local.
-
-# ==========================================
-# IDE — configuração de máquina, não de projeto
-# ==========================================
-.idea
-*.iml
-.vscode
-
-# ==========================================
+# ---------------------------------------------------------------------------
 # Lambda Node.js
-# ==========================================
+# ---------------------------------------------------------------------------
 node_modules/
+.npm/
+npm-debug.log*
+coverage/
+# Pacote da função gerado no build (archive_file).
 *.zip
 builds/
 
-# Chaves e credenciais. A chave RSA vive no SSM (SecureString) e é lida em runtime pela função;
-# PEM em disco é só conveniência de desenvolvimento.
+# ---------------------------------------------------------------------------
+# Kubernetes (defensivo: este repo não usa kubectl hoje, mas kubeconfig dá acesso ao cluster)
+# ---------------------------------------------------------------------------
+kubeconfig
+kubeconfig.*
+
+# ---------------------------------------------------------------------------
+# Segredos e credenciais — NUNCA versionar
+# ---------------------------------------------------------------------------
+# A chave RSA vive no SSM (SecureString) e é lida em runtime pela função; PEM em disco é só
+# conveniência de desenvolvimento.
 *.pem
+*.key
 .secrets/
 .aws/
 .env
+.env.*
+!.env.example
 
-# ==========================================
+# ---------------------------------------------------------------------------
+# IDEs, sistema operacional e logs
+# ---------------------------------------------------------------------------
+.idea
+*.iml
+.vscode
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.log
+
+# ---------------------------------------------------------------------------
 # IA / cockpit (moram na pasta-mãe, não neste repo)
-# ==========================================
+# ---------------------------------------------------------------------------
 CLAUDE.md
 .claude/
+.handoff/
 PLAN-FASE4.md
 PROGRESS-FASE4.md

@@ -1,0 +1,242 @@
+name: Terraform - Auth Serverless (Lambda + API Gateway)
+
+# Sem paths-ignore no pull_request: workflow pulado por filtro deixa o check obrigatório "Pending" e trava o merge.
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+    paths-ignore: [ "**.md" ]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "O que executar"
+        type: choice
+        required: true
+        default: plan
+        options: [ plan, apply, destroy ]
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_IN_AUTOMATION: "true"
+  NODE_VERSION: "20"
+
+jobs:
+  fmt-validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Lambda dependencies
+        run: npm ci --omit=dev --prefix lambda
+
+      - name: Test Lambda
+        run: node --test tests/
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.4
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (sem backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+  terraform:
+    if: github.event_name == 'workflow_dispatch'
+    needs: fmt-validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    # No job, não no workflow: um apply em curso não pode enfileirar nem cancelar o fmt-validate de um PR.
+    # Sem cancel-in-progress: abortar um apply no meio deixa recursos fora do state.
+    concurrency:
+      group: terraform-auth-serverless
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Só funciona logo após o configure-aws-credentials: com token expirado ele falha antes de qualquer outro step.
+      - name: Lab session expirada?
+        if: failure()
+        run: |
+          echo "::error::Credencial do AWS Academy expirou ou esta invalida (a sessao dura ~4h)."
+          echo "::error::Abra o lab, atualize ~/.aws/credentials e recole os 3 secrets deste repo."
+          echo "::error::O AWS_SESSION_TOKEN e obrigatorio; sem ele o erro vem como InvalidClientTokenId."
+
+      - name: Check lab session
+        run: aws sts get-caller-identity
+
+      - name: Check repository variables
+        run: |
+          if [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "::error::Repository variable TF_STATE_BUCKET nao definida."
+            echo "::error::Settings > Secrets and variables > Actions > Variables (NAO e um secret)."
+            echo "::error::Valor: o bucket de state criado uma unica vez pelo bootstrap-backend.ps1 do repo 2."
+            exit 1
+          fi
+
+      - name: Check upstream contract (SSM)
+        if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+        run: |
+          set -euo pipefail
+          missing=0
+          check() {
+            if ! aws ssm get-parameter --name "$1" > /dev/null 2>&1; then
+              echo "::error::Parametro ausente no SSM: $1 — quem publica: $2"
+              missing=1
+            fi
+          }
+          check /fase4/vpc/id              "repo 2 (fiap-fase4-infra-k8s)"
+          check /fase4/vpc/private-subnets "repo 2 (fiap-fase4-infra-k8s)"
+          check /fase4/rds/endpoint        "repo 3 (fiap-fase4-infra-db)"
+          check /fase4/rds/port            "repo 3 (fiap-fase4-infra-db)"
+          check /fase4/rds/db-name         "repo 3 (fiap-fase4-infra-db)"
+          check /fase4/rds/username        "repo 3 (fiap-fase4-infra-db)"
+          check /fase4/rds/client-sg-id    "repo 3 (fiap-fase4-infra-db)"
+          check /fase4/jwt/private-key     "bootstrap manual (sobrevive ao destroy)"
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Ordem de deploy: 2 -> 3 -> 4 -> 1. Aplique os repositorios anteriores primeiro."
+            exit 1
+          fi
+
+      - name: Check EKS LoadBalancer is alive
+        if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+        run: |
+          set -euo pipefail
+          # Captura antes de fatiar: num read com process substitution o status do aws se perde.
+          if ! raw=$(aws ssm get-parameter --name /fase4/eks/lb-dns \
+               --query "Parameter.[Value,LastModifiedDate]" --output text 2>/dev/null); then
+            echo "::error::/fase4/eks/lb-dns ausente. Rode o workflow_dispatch do cd.yml no repo 4."
+            exit 1
+          fi
+          lb=$(echo "$raw" | awk '{print $1}')
+          echo "lb-dns=$lb (publicado em $(echo "$raw" | awk '{print $2}'))"
+
+          code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' \
+                 "http://$lb/carworkshop/v1/q/health/ready" || true)
+          if [ "$code" != "200" ]; then
+            echo "::error::$lb nao responde (codigo $code) — o valor no SSM e de uma sessao anterior."
+            echo "::error::O ANY /{proxy+} nasceria devolvendo 503. Rode o workflow_dispatch do cd.yml"
+            echo "::error::no repo fiap-fase4-os-service e repita este workflow."
+            exit 1
+          fi
+          echo "LoadBalancer respondeu 200 — o proxy vai apontar para algo vivo."
+
+      - name: Check contract on destroy
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+        run: |
+          set -euo pipefail
+          for p in /fase4/vpc/id /fase4/vpc/private-subnets /fase4/rds/client-sg-id /fase4/eks/lb-dns; do
+            if ! aws ssm get-parameter --name "$p" > /dev/null 2>&1; then
+              echo "::error::$p nao existe mais — um repositorio anterior ja foi destruido e o destroy"
+              echo "::error::daqui falha ao ler os data sources. NAO rode apply. Ver 'Recuperacao' no README."
+              exit 1
+            fi
+          done
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Antes do Terraform: o archive_file empacota o disco, e sem node_modules a função quebra em runtime.
+      - name: Install Lambda dependencies
+        run: npm ci --omit=dev --prefix lambda
+
+      - name: Test Lambda
+        run: node --test tests/
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.4
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=auth-serverless/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="use_lockfile=true" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+        run: |
+          terraform plan -no-color -out=tfplan | tee plan.txt
+          {
+            echo "### Terraform plan"
+            echo '```'
+            tail -n 60 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform destroy
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
+
+      - name: Smoke test the API Gateway
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+        run: |
+          set -euo pipefail
+          api=$(terraform output -raw api_endpoint)
+
+          code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' -X POST "$api/auth" \
+                 -H 'content-type: application/json' -d '{"cpf":"12345678901"}')
+          echo "POST /auth com CPF invalido -> $code (esperado 400)"
+          [ "$code" = "400" ]
+
+          code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' "$api/carworkshop/v1/tracking/1")
+          echo "GET /tracking/1 sem token pelo Gateway -> $code (esperado 401)"
+          [ "$code" = "401" ]
+
+      - name: Show outputs
+        if: success() && github.event_name != 'pull_request'
+        run: terraform output || true
