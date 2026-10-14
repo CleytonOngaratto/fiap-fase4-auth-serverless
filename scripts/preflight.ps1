@@ -1,8 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Region = "us-east-1",
-    [string]$RoleName = "LabRole",
-    [int]$LbDnsMaxAgeHours = 4
+    [string]$Region = "us-east-1"
 )
 
 $ErrorActionPreference = "Continue"
@@ -32,111 +30,49 @@ if ($null -eq $identity) {
 }
 Write-Ok "Conta $($identity.Account) · $($identity.Arn)"
 
-Write-Head "2. Contrato de entrada (repos 2, 3 e 4 aplicados?)"
-$contract = [ordered]@{
-    "/fase4/vpc/id"              = "repo 2 (fiap-fase4-infra-k8s)"
-    "/fase4/vpc/private-subnets" = "repo 2 (fiap-fase4-infra-k8s)"
-    "/fase4/rds/endpoint"        = "repo 3 (fiap-fase4-infra-db)"
-    "/fase4/rds/port"            = "repo 3 (fiap-fase4-infra-db)"
-    "/fase4/rds/db-name"         = "repo 3 (fiap-fase4-infra-db)"
-    "/fase4/rds/username"        = "repo 3 (fiap-fase4-infra-db)"
-    "/fase4/rds/client-sg-id"    = "repo 3 (fiap-fase4-infra-db)"
-    "/fase4/jwt/private-key"     = "bootstrap manual (sobrevive ao destroy)"
+Write-Head "2. persistent/ ja aplicado? (uma vez por conta do lab)"
+$apiId = Invoke-Probe -Exe "aws" -ProbeArgs @("ssm", "get-parameter", "--name", "/fase4/apigw/api-id", "--region", $Region, "--query", "Parameter.Value", "--output", "text")
+if ($apiId) {
+    Write-Ok "/fase4/apigw/api-id = $apiId"
 }
-foreach ($name in $contract.Keys) {
+else {
+    Write-Warn2 "/fase4/apigw/api-id ausente: rode o workflow_dispatch com root=persistent e action=apply antes do session/."
+    Write-Host "         Depois de um Reset do lab a API some e a URL muda: reconfigure o webhook no painel do Mercado Pago." -ForegroundColor Yellow
+}
+
+Write-Head "3. Contrato da plataforma (o session/ le estes parametros)"
+$contract = @(
+    "/fase4/vpc/id",
+    "/fase4/vpc/private-subnets",
+    "/fase4/alb/listener-arn",
+    "/fase4/alb/sg-id"
+)
+foreach ($name in $contract) {
     $value = Invoke-Probe -Exe "aws" -ProbeArgs @("ssm", "get-parameter", "--name", $name, "--region", $Region, "--query", "Parameter.Value", "--output", "text")
-    if ($value) {
-        $shown = if ($name -like "*jwt*") { "<$(($value -join "`n").Length) chars>" } else { $value }
-        Write-Ok "$name = $shown"
+    if ($value) { Write-Ok "$name = $value" }
+    else { Write-Fail "$name AUSENTE — quem publica: fiap-fase4-infra-k8s. Ordem: plataforma -> infra dos servicos -> deploy -> borda." }
+}
+
+Write-Head "4. backend.hcl de cada root"
+foreach ($root in @("persistent", "session")) {
+    $backendPath = Join-Path $repoRoot "$root/backend.hcl"
+    if (Test-Path $backendPath) {
+        Write-Ok "$root/backend.hcl ja existe"
+        continue
     }
-    else {
-        Write-Fail "$name AUSENTE — quem publica: $($contract[$name]). Ordem de deploy: 2 -> 3 -> 4 -> 1."
-    }
-}
-
-Write-Head "3. /fase4/eks/lb-dns aponta para um LoadBalancer VIVO?"
-
-$lb = Invoke-Probe -Exe "aws" -ProbeArgs @("ssm", "get-parameter", "--name", "/fase4/eks/lb-dns", "--region", $Region, "--query", "Parameter.[Value,LastModifiedDate]", "--output", "text")
-if (-not $lb) {
-    Write-Fail "/fase4/eks/lb-dns AUSENTE — rode o workflow_dispatch do cd.yml no repo 4 (fiap-fase4-os-service)."
-}
-else {
-    $parts = ($lb -join " ") -split "\s+"
-    $lbDns = $parts[0]
-    $modified = [datetime]::Parse($parts[1])
-    $ageHours = [math]::Round(((Get-Date) - $modified).TotalHours, 1)
-
-    if ($ageHours -gt $LbDnsMaxAgeHours) {
-        Write-Warn2 "publicado ha $ageHours h ($modified) — mais que uma sessao do lab. Provavelmente e lixo da sessao anterior."
-    }
-    else {
-        Write-Ok "publicado ha $ageHours h ($modified)"
-    }
-
-    $health = "http://$lbDns/carworkshop/v1/q/health/ready"
-    $code = Invoke-Probe -Exe "curl.exe" -ProbeArgs @("-s", "-o", "NUL", "-m", "15", "-w", "%{http_code}", $health)
-    if ($code -eq "200") {
-        Write-Ok "$lbDns responde 200 em /q/health/ready — o proxy vai nascer apontando para algo vivo"
-    }
-    else {
-        Write-Fail "$lbDns NAO responde (codigo '$code'). O ANY /{proxy+} nasceria devolvendo 503."
-        Write-Host "         Rode o workflow_dispatch do cd.yml no repo 4 e repita este preflight." -ForegroundColor Red
-    }
-}
-
-Write-Head "4. Zip da Lambda tera as dependencias?"
-
-$modules = Join-Path $repoRoot "lambda/node_modules"
-if (Test-Path (Join-Path $modules "pg")) {
-    Write-Ok "lambda/node_modules presente (pg, jsonwebtoken, @aws-sdk/client-ssm)"
-}
-else {
-    Write-Fail "lambda/node_modules AUSENTE ou incompleto — rode:  npm ci --omit=dev --prefix lambda"
-}
-
-Write-Head "5. A LabRole consegue ler a chave RSA cifrada?"
-
-$roleArn = "arn:aws:iam::$($identity.Account):role/$RoleName"
-$simulated = Invoke-Probe -Exe "aws" -ProbeArgs @(
-    "iam", "simulate-principal-policy", "--policy-source-arn", $roleArn,
-    "--action-names", "ssm:GetParameters", "kms:Decrypt",
-    "--query", "EvaluationResults[].[EvalActionName,EvalDecision]", "--output", "text")
-
-if ($simulated) {
-    $denied = @($simulated | Where-Object { $_ -notmatch "allowed" })
-    if ($denied.Count -eq 0) { Write-Ok "simulate-principal-policy: ssm:GetParameters e kms:Decrypt permitidos para $RoleName" }
-    else { Write-Fail "$RoleName SEM permissao: $($denied -join '; ') — ver 'Plano B' no README." }
-}
-else {
-    $assumed = Invoke-Probe -Exe "aws" -ProbeArgs @(
-        "sts", "assume-role", "--role-arn", $roleArn, "--role-session-name", "fase4-preflight",
-        "--query", "Credentials.AccessKeyId", "--output", "text")
-    if ($assumed) { Write-Warn2 "simulate negado, mas o assume-role funciona — teste manual descrito no README." }
-    else {
-        Write-Warn2 "iam:SimulatePrincipalPolicy e sts:AssumeRole negados ao seu usuario do lab (esperado)."
-        Write-Host "         RISCO EM ABERTO: se a LabRole nao tiver kms:Decrypt, /auth devolve 500 e o" -ForegroundColor Yellow
-        Write-Host "         CloudWatch da funcao mostra AccessDeniedException. Plano B no README." -ForegroundColor Yellow
-    }
-}
-
-Write-Head "6. backend.hcl"
-$backendPath = Join-Path $repoRoot "backend.hcl"
-if (Test-Path $backendPath) {
-    Write-Ok "backend.hcl ja existe"
-}
-else {
-    Write-Warn2 "backend.hcl ausente. Crie com o conteudo abaixo (o bucket veio do bootstrap do repo 2):"
+    Write-Warn2 "$root/backend.hcl ausente. Crie com o conteudo abaixo (o bucket veio do bootstrap da plataforma):"
     Write-Host ""
     Write-Host "bucket       = `"fiap-fase4-tfstate-$($identity.Account)`"" -ForegroundColor DarkGray
-    Write-Host "key          = `"auth-serverless/terraform.tfstate`"" -ForegroundColor DarkGray
+    Write-Host "key          = `"auth-serverless/$root.tfstate`"" -ForegroundColor DarkGray
     Write-Host "region       = `"$Region`"" -ForegroundColor DarkGray
     Write-Host "use_lockfile = true" -ForegroundColor DarkGray
     Write-Host "encrypt      = true" -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 Write-Host ""
 if ($script:Failed) {
-    Write-Host "PREFLIGHT REPROVADO — resolva os [FAIL] acima antes do apply." -ForegroundColor Red
+    Write-Host "PREFLIGHT REPROVADO — resolva os [FAIL] acima antes do apply do session/." -ForegroundColor Red
     exit 1
 }
-Write-Host "PREFLIGHT OK — pode seguir para terraform init/plan/apply." -ForegroundColor Green
+Write-Host "PREFLIGHT OK — pode seguir para o plan/apply." -ForegroundColor Green

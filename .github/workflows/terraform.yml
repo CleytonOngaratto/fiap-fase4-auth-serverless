@@ -1,14 +1,21 @@
-name: Terraform - Auth Serverless (Lambda + API Gateway)
+name: Terraform - Auth Serverless (API Gateway persistente + borda de sessao)
 
-# Sem paths-ignore no pull_request: workflow pulado por filtro deixa o check obrigatório "Pending" e trava o merge.
+# Sem filtro de caminho no pull_request: workflow pulado por filtro deixa o check obrigatório "Pending" e trava o merge.
 on:
   pull_request:
     branches: [ "main" ]
+  # O push na main aplica só o session/; o persistent/ (URL que vai para o painel do Mercado Pago) só sobe por dispatch.
   push:
     branches: [ "main" ]
-    paths-ignore: [ "**.md" ]
+    paths: [ "session/**", ".github/workflows/terraform.yml" ]
   workflow_dispatch:
     inputs:
+      root:
+        description: "Root do Terraform"
+        type: choice
+        required: true
+        default: session
+        options: [ session, persistent ]
       action:
         description: "O que executar"
         type: choice
@@ -23,6 +30,8 @@ env:
   AWS_REGION: us-east-1
   TF_IN_AUTOMATION: "true"
   NODE_VERSION: "20"
+  TF_ROOT: ${{ github.event_name == 'workflow_dispatch' && inputs.root || 'session' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
 
 jobs:
   fmt-validate:
@@ -47,7 +56,7 @@ jobs:
         run: node --test tests/
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: 1.15.4
           terraform_wrapper: false
@@ -55,14 +64,17 @@ jobs:
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init (sem backend)
-        run: terraform init -backend=false -input=false
+      - name: Terraform init e validate (persistent/)
+        run: |
+          terraform -chdir=persistent init -backend=false -input=false
+          terraform -chdir=persistent validate
 
-      - name: Terraform validate
-        run: terraform validate
+      - name: Terraform init e validate (session/)
+        run: |
+          terraform -chdir=session init -backend=false -input=false
+          terraform -chdir=session validate
 
   terraform:
-    if: github.event_name == 'workflow_dispatch'
     needs: fmt-validate
     runs-on: ubuntu-latest
     defaults:
@@ -72,7 +84,7 @@ jobs:
     # No job, não no workflow: um apply em curso não pode enfileirar nem cancelar o fmt-validate de um PR.
     # Sem cancel-in-progress: abortar um apply no meio deixa recursos fora do state.
     concurrency:
-      group: terraform-auth-serverless
+      group: terraform-auth-${{ github.event_name == 'workflow_dispatch' && inputs.root || 'session' }}
       cancel-in-progress: false
 
     steps:
@@ -80,7 +92,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -92,7 +104,8 @@ jobs:
         if: failure()
         run: |
           echo "::error::Credencial do AWS Academy expirou ou esta invalida (a sessao dura ~4h)."
-          echo "::error::Abra o lab, atualize ~/.aws/credentials e recole os 3 secrets deste repo."
+          echo "::error::Abra o lab, atualize ~/.aws/credentials e rode, no repo de plataforma:"
+          echo "::error::  fiap-fase4-infra-k8s/scripts/refresh-gh-secrets.ps1 -Org CleytonOngaratto"
           echo "::error::O AWS_SESSION_TOKEN e obrigatorio; sem ele o erro vem como InvalidClientTokenId."
 
       - name: Check lab session
@@ -100,111 +113,58 @@ jobs:
 
       - name: Check repository variables
         run: |
-          if [ -z "${{ vars.TF_STATE_BUCKET }}" ]; then
-            echo "::error::Repository variable TF_STATE_BUCKET nao definida."
+          if [ -z "$TF_STATE_BUCKET" ]; then
+            echo "::error::Repository variable TF_STATE_BUCKET nao definida (valor: o bucket criado pelo bootstrap-backend.ps1 da plataforma)."
             echo "::error::Settings > Secrets and variables > Actions > Variables (NAO e um secret)."
-            echo "::error::Valor: o bucket de state criado uma unica vez pelo bootstrap-backend.ps1 do repo 2."
             exit 1
           fi
 
       - name: Check upstream contract (SSM)
-        if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+        if: env.TF_ROOT == 'session'
         run: |
           set -euo pipefail
           missing=0
           check() {
             if ! aws ssm get-parameter --name "$1" > /dev/null 2>&1; then
-              echo "::error::Parametro ausente no SSM: $1 — quem publica: $2"
+              echo "::error::Parametro ausente no SSM: $1 - quem publica: $2"
               missing=1
             fi
           }
-          check /fase4/vpc/id              "repo 2 (fiap-fase4-infra-k8s)"
-          check /fase4/vpc/private-subnets "repo 2 (fiap-fase4-infra-k8s)"
-          check /fase4/rds/endpoint        "repo 3 (fiap-fase4-infra-db)"
-          check /fase4/rds/port            "repo 3 (fiap-fase4-infra-db)"
-          check /fase4/rds/db-name         "repo 3 (fiap-fase4-infra-db)"
-          check /fase4/rds/username        "repo 3 (fiap-fase4-infra-db)"
-          check /fase4/rds/client-sg-id    "repo 3 (fiap-fase4-infra-db)"
-          check /fase4/jwt/private-key     "bootstrap manual (sobrevive ao destroy)"
+          check /fase4/vpc/id              "fiap-fase4-infra-k8s"
+          check /fase4/vpc/private-subnets "fiap-fase4-infra-k8s"
+          check /fase4/alb/listener-arn    "fiap-fase4-infra-k8s"
+          check /fase4/alb/sg-id           "fiap-fase4-infra-k8s"
+          check /fase4/apigw/api-id        "root persistent/ deste repositorio (workflow_dispatch, uma vez por conta do lab)"
           if [ "$missing" -eq 1 ]; then
-            echo "::error::Ordem de deploy: 2 -> 3 -> 4 -> 1. Aplique os repositorios anteriores primeiro."
+            echo "::error::Ordem de deploy: plataforma -> infra dos servicos -> deploy dos servicos -> borda."
+            echo "::error::No destroy a plataforma tem de estar de pe: os data sources leem estes parametros."
             exit 1
           fi
-
-      - name: Check EKS LoadBalancer is alive
-        if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
-        run: |
-          set -euo pipefail
-          # Captura antes de fatiar: num read com process substitution o status do aws se perde.
-          if ! raw=$(aws ssm get-parameter --name /fase4/eks/lb-dns \
-               --query "Parameter.[Value,LastModifiedDate]" --output text 2>/dev/null); then
-            echo "::error::/fase4/eks/lb-dns ausente. Rode o workflow_dispatch do cd.yml no repo 4."
-            exit 1
-          fi
-          lb=$(echo "$raw" | awk '{print $1}')
-          echo "lb-dns=$lb (publicado em $(echo "$raw" | awk '{print $2}'))"
-
-          code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' \
-                 "http://$lb/carworkshop/v1/q/health/ready" || true)
-          if [ "$code" != "200" ]; then
-            echo "::error::$lb nao responde (codigo $code) — o valor no SSM e de uma sessao anterior."
-            echo "::error::O ANY /{proxy+} nasceria devolvendo 503. Rode o workflow_dispatch do cd.yml"
-            echo "::error::no repo fiap-fase4-os-service e repita este workflow."
-            exit 1
-          fi
-          echo "LoadBalancer respondeu 200 — o proxy vai apontar para algo vivo."
-
-      - name: Check contract on destroy
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
-        run: |
-          set -euo pipefail
-          for p in /fase4/vpc/id /fase4/vpc/private-subnets /fase4/rds/client-sg-id /fase4/eks/lb-dns; do
-            if ! aws ssm get-parameter --name "$p" > /dev/null 2>&1; then
-              echo "::error::$p nao existe mais — um repositorio anterior ja foi destruido e o destroy"
-              echo "::error::daqui falha ao ler os data sources. NAO rode apply. Ver 'Recuperacao' no README."
-              exit 1
-            fi
-          done
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      # Antes do Terraform: o archive_file empacota o disco, e sem node_modules a função quebra em runtime.
-      - name: Install Lambda dependencies
-        run: npm ci --omit=dev --prefix lambda
-
-      - name: Test Lambda
-        run: node --test tests/
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: 1.15.4
           terraform_wrapper: false
 
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive
-
       - name: Terraform init
         run: |
-          terraform init \
-            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-            -backend-config="key=auth-serverless/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
+          terraform -chdir="$TF_ROOT" init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=auth-serverless/${TF_ROOT}.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
             -backend-config="use_lockfile=true" \
             -backend-config="encrypt=true"
 
       - name: Terraform validate
-        run: terraform validate
+        run: terraform -chdir="$TF_ROOT" validate
 
       - name: Terraform plan
         if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
         run: |
-          terraform plan -no-color -out=tfplan | tee plan.txt
+          terraform -chdir="$TF_ROOT" plan -no-color -out=tfplan | tee plan.txt
           {
-            echo "### Terraform plan"
+            echo "### Terraform plan ($TF_ROOT/)"
             echo '```'
             tail -n 60 plan.txt
             echo '```'
@@ -214,29 +174,39 @@ jobs:
         if: |
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
           (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
-        run: terraform apply -auto-approve tfplan
+        run: terraform -chdir="$TF_ROOT" apply -auto-approve tfplan
 
       - name: Terraform destroy
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
-        run: terraform destroy -auto-approve
+        run: terraform -chdir="$TF_ROOT" destroy -auto-approve
 
-      - name: Smoke test the API Gateway
+      - name: Smoke test pelo Gateway
         if: |
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+          env.TF_ROOT == 'session' && (
+            (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+            (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
         run: |
           set -euo pipefail
-          api=$(terraform output -raw api_endpoint)
+          api=$(aws ssm get-parameter --name /fase4/apigw/url --query Parameter.Value --output text)
 
-          code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' -X POST "$api/auth" \
-                 -H 'content-type: application/json' -d '{"cpf":"12345678901"}')
-          echo "POST /auth com CPF invalido -> $code (esperado 400)"
-          [ "$code" = "400" ]
+          check() {
+            local path="$1" want="$2" code=""
+            for _ in $(seq 1 12); do
+              code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$api$path" || true)
+              if [ "$code" = "$want" ]; then
+                break
+              fi
+              sleep 10
+            done
+            echo "GET $path -> $code (esperado $want)"
+            [ "$code" = "$want" ]
+          }
 
-          code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' "$api/carworkshop/v1/tracking/1")
-          echo "GET /tracking/1 sem token pelo Gateway -> $code (esperado 401)"
-          [ "$code" = "401" ]
+          check /billing/v1/info 200
+          check /execution/v1/info 200
+          check /carworkshop/v1/tracking/1 401
+          check /carworkshop/v1/q/health/ready 404
 
       - name: Show outputs
-        if: success() && github.event_name != 'pull_request'
-        run: terraform output || true
+        if: success() && github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.action == 'destroy')
+        run: terraform -chdir="$TF_ROOT" output || true
