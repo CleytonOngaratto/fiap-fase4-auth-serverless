@@ -5,9 +5,11 @@ on:
   pull_request:
     branches: [ "main" ]
   # O push na main aplica só o session/; o persistent/ (URL que vai para o painel do Mercado Pago) só sobe por dispatch.
+  # lambda/ entra no filtro porque o archive_file do session/ zipa essa pasta: sem ela aqui, um conserto na
+  # funcao e mergeado e nunca chega a producao. tests/ fica fora: nao entra no pacote.
   push:
     branches: [ "main" ]
-    paths: [ "session/**", ".github/workflows/terraform.yml" ]
+    paths: [ "session/**", "lambda/**", ".github/workflows/terraform.yml" ]
   workflow_dispatch:
     inputs:
       root:

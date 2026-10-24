@@ -18,7 +18,7 @@ Internet ──HTTPS──► API Gateway (persistent/) ──rotas explícitas�
 | Root | O que cria | Ciclo de vida | Como aplica |
 |---|---|---|---|
 | [`persistent/`](persistent/) | HTTP API `fiap-fase4-api`, stage `$default` (*auto deploy*) e log group de acesso; publica `/fase4/apigw/api-id` e `/fase4/apigw/url` | **uma vez por conta do laboratório**; não entra no teardown de sessão; `prevent_destroy` no HTTP API | só `workflow_dispatch` (`root=persistent`) |
-| [`session/`](session/) | VPC Link nas subnets privadas (o security group dele só sai para o ALB interno, na 80), uma integração com o listener do ALB e as rotas | sobe e desce com a sessão | `push` na `main` com mudança em `session/`, ou `workflow_dispatch` (`root=session`) |
+| [`session/`](session/) | VPC Link nas subnets privadas (o security group dele só sai para o ALB interno, na 80), uma integração com o listener do ALB e as rotas | sobe e desce com a sessão | `push` na `main` com mudança em `session/` ou em `lambda/`, ou `workflow_dispatch` (`root=session`) |
 
 A URL do Gateway fica **estável entre sessões** porque o HTTP API mora no `persistent/`: é ela que vai para o painel
 do Mercado Pago (webhook). States separados: `auth-serverless/persistent.tfstate` e `auth-serverless/session.tfstate`.
@@ -54,8 +54,10 @@ ID do HTTP API e o contrato da plataforma, e falha dizendo quem publica se falta
 **Teardown:** o `session/` é o **primeiro** a sair (`scripts/destroy-all.ps1` da plataforma); o `persistent/`
 **nunca** entra.
 
-**O merge aplica.** Um merge que mude `session/` ou o workflow aplica o `session/` — só com a sessão do laboratório
-ligada, a plataforma e os serviços de pé, e o teardown na mesma sessão.
+**O merge aplica.** Um merge que mude `session/`, `lambda/` ou o workflow aplica o `session/` — só com a sessão do
+laboratório ligada, a plataforma e os serviços de pé, e o teardown na mesma sessão. `lambda/` está no filtro porque o
+`archive_file` do `session/` zipa essa pasta: sem ela, um conserto na função seria mergeado e nunca chegaria a
+produção. `tests/` fica fora de propósito — não entra no pacote da função.
 
 ## O que um *Reset* do laboratório apaga
 
@@ -74,7 +76,7 @@ Apagar o HTTP API de propósito exige um PR que tire o `prevent_destroy` de
 | Gatilho | O que roda |
 |---|---|
 | `pull_request` → `main` | `fmt-validate` (testes da Lambda + `fmt -check` + `init -backend=false` e `validate` nos dois roots — **check obrigatório**) e `terraform` (`plan` do `session/`) |
-| `push` → `main` com mudança em `session/` ou no workflow | `fmt-validate` e `terraform` (`plan` → `apply` do `session/` → smoke pelo Gateway) |
+| `push` → `main` com mudança em `session/`, `lambda/` ou no workflow | `fmt-validate` e `terraform` (`plan` → `apply` do `session/` → smoke pelo Gateway) |
 | `workflow_dispatch` | `root` = `session` \| `persistent` · `action` = `plan` \| `apply` \| `destroy` |
 
 **Smoke do `session/`:** `GET /billing/v1/info` e `GET /execution/v1/info` → **200**;
