@@ -202,10 +202,27 @@ jobs:
             [ "$code" = "$want" ]
           }
 
+          # POST com corpo vazio: 400 prova que a Lambda executou (404 seria rota ausente), sem tocar no OS.
+          check_auth() {
+            local code=""
+            for _ in $(seq 1 12); do
+              code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' -X POST "$api/auth" \
+                     -H 'content-type: application/json' -d '{}' || true)
+              if [ "$code" = "400" ]; then
+                break
+              fi
+              sleep 10
+            done
+            echo "POST /auth -> $code (esperado 400)"
+            [ "$code" = "400" ]
+          }
+
           check /billing/v1/info 200
           check /execution/v1/info 200
           check /carworkshop/v1/tracking/1 401
           check /carworkshop/v1/q/health/ready 404
+          check /carworkshop/v1/internal/customers/12345678901 404
+          check_auth
 
       - name: Show outputs
         if: success() && github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.action == 'destroy')

@@ -34,10 +34,16 @@ genérica expõe health, métricas e OpenAPI. Tudo o que não está aqui recebe 
 | Billing | `GET /billing/v1/info` |
 | Execution | `GET /execution/v1/info` |
 
-`/carworkshop/v1/auth/signup` **não** é publicado: hoje ele aceita os papéis vindos da requisição.
+`/carworkshop/v1/auth/signup` **não** é publicado: criar administrador é ação de atendimento, não de cliente.
 
-A Lambda de CPF (`lambda/`, testada no CI) está fora do Terraform até o endpoint interno do OS existir; a rota
-`POST /auth` volta com ela no `session/`.
+A Lambda de CPF (`lambda/`, testada no CI) vive no `session/`, e a rota `POST /auth` aponta para ela.
+
+**A função não acessa banco nenhum.** Ela valida os dígitos do CPF, confirma o cliente num **endpoint interno
+do OS Service** pelo ALB privado e assina o JWT. Suas únicas dependências são o Parameter Store (chave RSA e a
+credencial de serviço, lidas em runtime por *nome*) e o ALB interno; o grupo de segurança dela só sai para 443,
+para a porta 80 do ALB e para o DNS da VPC. OS Service indisponível resulta em **503**, distinto de erro
+interno. O porquê desse desenho e as duas camadas que protegem o endpoint estão no
+[ADR-007](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-007-lambda-sem-banco-do-os.md).
 
 ## Ordem
 
