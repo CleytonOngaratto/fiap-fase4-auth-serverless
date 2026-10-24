@@ -99,3 +99,79 @@ test("o cpf vai codificado no caminho", async () => {
     restore();
   }
 });
+
+test("falha de transporte na primeira tentativa -> a segunda responde", async () => {
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw new Error("This operation was aborted");
+    }
+    return new Response(JSON.stringify({ id: 4, name: "Dona Prova" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  try {
+    assert.deepEqual(await call(), { id: 4, name: "Dona Prova" });
+    assert.equal(calls, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("falha de transporte nas duas tentativas -> indisponível, e para em duas", async () => {
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls += 1;
+    throw new Error("This operation was aborted");
+  });
+  try {
+    await assert.rejects(call(), OsServiceUnavailable);
+    assert.equal(calls, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("5xx é retentado uma vez", async () => {
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls += 1;
+    return new Response("", { status: 503 });
+  });
+  try {
+    await assert.rejects(call(), OsServiceUnavailable);
+    assert.equal(calls, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("credencial errada não é retentada", async () => {
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls += 1;
+    return new Response("", { status: 401 });
+  });
+  try {
+    await assert.rejects(call(), OsServiceUnavailable);
+    assert.equal(calls, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("cliente ausente não é retentado", async () => {
+  let calls = 0;
+  const restore = stubFetch(async () => {
+    calls += 1;
+    return new Response("", { status: 404 });
+  });
+  try {
+    assert.equal(await call(), null);
+    assert.equal(calls, 1);
+  } finally {
+    restore();
+  }
+});
