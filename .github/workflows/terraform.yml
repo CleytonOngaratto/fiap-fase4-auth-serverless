@@ -91,6 +91,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # O archive_file do session/ zipa lambda/ neste job: sem node_modules aqui, a funcao sobe sem
+      # as dependencias e morre com ERR_MODULE_NOT_FOUND na primeira invocacao.
+      - name: Set up Node.js
+        if: env.TF_ROOT == 'session'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Lambda dependencies
+        if: env.TF_ROOT == 'session'
+        run: npm ci --omit=dev --prefix lambda
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
