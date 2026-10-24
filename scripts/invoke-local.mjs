@@ -10,16 +10,13 @@ if (!cpf) {
 }
 
 const defaults = {
-  DB_HOST: "localhost",
-  DB_PORT: "5433",
-  DB_NAME: "oficina_db",
-  DB_USER: "postgres",
-  DB_PASSWORD: "postgres",
-  DB_SSL: "disable",
+  OS_INTERNAL_URL: "http://localhost:8080/carworkshop/v1/internal/customers",
+  OS_SERVICE_TOKEN: "dev-service-token",
+  OS_TIMEOUT_MS: "3000",
   JWT_ISSUER: "https://oficina-api.com",
   JWT_TTL_SECONDS: "3600",
   JWT_PRIVATE_KEY_PARAM: "/fase4/jwt/private-key",
-  DB_PASSWORD_PARAM: "/fase4/rds/password",
+  OS_SERVICE_TOKEN_PARAM: "/fase4/os/internal/service-token",
   AWS_REGION: "us-east-1",
 };
 for (const [key, value] of Object.entries(defaults)) {

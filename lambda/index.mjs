@@ -1,6 +1,6 @@
 import { config, loadSecrets } from "./config.mjs";
 import { isValidCpf, maskCpf } from "./cpf.mjs";
-import { getPool, findCustomerByDocument } from "./db.mjs";
+import { findCustomerByDocument, OsServiceUnavailable } from "./osService.mjs";
 import { signCustomerToken } from "./jwt.mjs";
 
 const json = (statusCode, body) => ({
@@ -39,8 +39,12 @@ export const handler = async (event) => {
 
   try {
     const secrets = await loadSecrets();
-    const pool = getPool({ ...config.db, password: secrets.dbPassword });
-    const customer = await findCustomerByDocument(pool, cpf);
+    const customer = await findCustomerByDocument({
+      baseUrl: config.os.internalUrl,
+      document: cpf,
+      serviceToken: secrets.serviceToken,
+      timeoutMs: config.os.timeoutMs,
+    });
 
     if (!customer) {
       console.info(JSON.stringify({ event: "customer_not_found", cpf: maskCpf(cpf) }));
@@ -63,6 +67,10 @@ export const handler = async (event) => {
       expires_in: config.jwt.ttlSeconds,
     });
   } catch (error) {
+    if (error instanceof OsServiceUnavailable) {
+      console.error(JSON.stringify({ event: "os_service_unavailable", message: error.message }));
+      return json(503, { error: "service_unavailable" });
+    }
     console.error(JSON.stringify({ event: "internal_error", message: error.message }));
     return json(500, { error: "internal_error" });
   }

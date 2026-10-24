@@ -3,12 +3,9 @@ import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 const num = (value, fallback) => (value ? Number(value) : fallback);
 
 export const config = {
-  db: {
-    host: process.env.DB_HOST,
-    port: num(process.env.DB_PORT, 5432),
-    database: process.env.DB_NAME,
-    user: process.env.DB_USER,
-    ssl: process.env.DB_SSL ?? "require",
+  os: {
+    internalUrl: process.env.OS_INTERNAL_URL,
+    timeoutMs: num(process.env.OS_TIMEOUT_MS, 3000),
   },
   jwt: {
     issuer: process.env.JWT_ISSUER,
@@ -16,12 +13,12 @@ export const config = {
   },
   params: {
     privateKey: process.env.JWT_PRIVATE_KEY_PARAM,
-    dbPassword: process.env.DB_PASSWORD_PARAM,
+    serviceToken: process.env.OS_SERVICE_TOKEN_PARAM,
   },
-  // Só o harness local preenche: o Terraform nunca define DB_PASSWORD nem JWT_PRIVATE_KEY.
+  // Só o harness local preenche: o Terraform nunca define o valor, apenas o nome do parâmetro.
   overrides: {
     privateKey: process.env.JWT_PRIVATE_KEY,
-    dbPassword: process.env.DB_PASSWORD,
+    serviceToken: process.env.OS_SERVICE_TOKEN,
   },
 };
 
@@ -30,7 +27,7 @@ let cached;
 async function fetchSecrets() {
   const wanted = [
     { key: "privateKey", name: config.params.privateKey },
-    { key: "dbPassword", name: config.params.dbPassword },
+    { key: "serviceToken", name: config.params.serviceToken },
   ].filter((entry) => !config.overrides[entry.key]);
 
   const resolved = { ...config.overrides };
