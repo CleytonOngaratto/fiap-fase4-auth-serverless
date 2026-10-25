@@ -42,7 +42,15 @@ A Lambda de CPF (`lambda/`, testada no CI) vive no `session/`, e a rota `POST /a
 do OS Service** pelo ALB privado e assina o JWT. Suas únicas dependências são o Parameter Store (chave RSA e a
 credencial de serviço, lidas em runtime por *nome*) e o ALB interno; o grupo de segurança dela só sai para 443,
 para a porta 80 do ALB e para o DNS da VPC. OS Service indisponível resulta em **503**, distinto de erro
-interno. O porquê desse desenho e as duas camadas que protegem o endpoint estão no
+interno.
+
+**A consulta é tentada duas vezes antes do 503.** Medido em sessão: a primeira chamada depois de os pods do OS
+serem reagendados estourou o orçamento de 3 s, e a seguinte levou 17 ms — o custo é a primeira conexão ao ALB,
+não a partida da função. Como a consulta é um `GET`, repeti-la é seguro, e isso troca um 503 no primeiro login
+por mais 3 s no pior caso. **Credencial de serviço errada (401) e cliente ausente (404) não são retentados:**
+são respostas, não falhas.
+
+O porquê desse desenho e as duas camadas que protegem o endpoint estão no
 [ADR-007](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-007-lambda-sem-banco-do-os.md).
 
 ## Ordem
