@@ -37,5 +37,7 @@ locals {
     "POST /billing/v1/budgets/{id}/approve",
     "POST /billing/v1/budgets/{id}/reject",
     "GET /execution/v1/info",
+    "GET /execution/v1/queue",
+    "ANY /execution/v1/work-orders/{proxy+}",
   ])
 }

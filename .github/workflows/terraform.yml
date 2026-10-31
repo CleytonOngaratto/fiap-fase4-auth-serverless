@@ -253,8 +253,10 @@ jobs:
           check /billing/v1/budgets/00000000-0000-4000-8000-000000000000 401
           check_webhook
           check /carworkshop/v1/tracking/1 401
+          check "/execution/v1/queue?branchId=SP-01" 401
           check /carworkshop/v1/q/health/ready 404
           check /carworkshop/v1/internal/customers/12345678901 404
+          check /carworkshop/v1/internal/catalog/validate 404
           check_auth
 
       - name: Show outputs
