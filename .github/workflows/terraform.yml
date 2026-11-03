@@ -251,6 +251,7 @@ jobs:
           check /billing/v1/info 200
           check /execution/v1/info 200
           check /billing/v1/budgets/00000000-0000-4000-8000-000000000000 401
+          check "/billing/v1/budgets?work_order_id=1" 401
           check_webhook
           check /carworkshop/v1/tracking/1 401
           check "/execution/v1/queue?branchId=SP-01" 401
