@@ -33,6 +33,7 @@ locals {
     "GET /carworkshop/v1/tracking/{id}",
     "GET /billing/v1/info",
     "POST /billing/v1/webhooks/mercadopago",
+    "GET /billing/v1/budgets",
     "GET /billing/v1/budgets/{id}",
     "POST /billing/v1/budgets/{id}/approve",
     "POST /billing/v1/budgets/{id}/reject",
