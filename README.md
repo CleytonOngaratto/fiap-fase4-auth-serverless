@@ -9,9 +9,50 @@ serviços, e a Lambda de autenticação por CPF. Terraform + Node.js.
 > — em especial o [ADR-003 (borda privada)](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-003-borda-privada.md)
 > e o [ADR-004 (Gateway persistente)](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-004-gateway-persistente.md).
 
+```mermaid
+flowchart TB
+    CLI["Internet"]
+    MP(["Mercado Pago<br/>webhook"])
+
+    subgraph persistent["persistent/ — fica entre sessões"]
+        GW{{"HTTP API<br/>URL estável"}}
+    end
+
+    subgraph session["session/ — sobe e desce com a sessão"]
+        RT["Allowlist<br/>20 rotas + POST /auth"]
+        LAM["Lambda de CPF"]
+        VL["VPC Link"]
+    end
+
+    ALB{{"ALB interno"}}
+    PODS["Pods dos 3 serviços"]
+    SSM["Parameter Store<br/>chave RSA e credencial de serviço"]
+
+    CLI -->|HTTPS| GW
+    MP -->|HTTPS| GW
+    GW --> RT
+    RT -->|POST /auth| LAM
+    RT --> VL
+    VL --> ALB
+    ALB --> PODS
+    LAM -->|confirma o CPF| ALB
+    LAM --> SSM
 ```
-Internet ──HTTPS──► API Gateway (persistent/) ──rotas explícitas──► VPC Link (session/) ──► ALB interno ──► pods
-```
+
+## Tecnologias
+
+| Tecnologia | Versão | Uso |
+|---|---|---|
+| Terraform | **1.15.4** (`>= 1.11`) | os dois roots, `persistent/` e `session/` |
+| Provider `hashicorp/aws` | **6.62.0** | fixado no `.terraform.lock.hcl` de cada root |
+| Provider `hashicorp/archive` | **2.8.1** | empacota a função, no `session/` |
+| Amazon API Gateway HTTP API e VPC Link | — | única entrada pública |
+| AWS Lambda | runtime `nodejs20.x` | autenticação por CPF |
+| Node.js | **20** | runtime e CI (`node --test`) |
+| `@aws-sdk/client-ssm` | **3.1125.0** | lê a chave RSA e a credencial de serviço em runtime |
+| `jsonwebtoken` | **9.0.3** | assina o JWT em RS256 |
+
+As versões dos pacotes são as do [`lambda/package-lock.json`](lambda/package-lock.json).
 
 ## Dois roots de Terraform
 
@@ -28,13 +69,17 @@ do Mercado Pago (webhook). States separados: `auth-serverless/persistent.tfstate
 O casamento é **sensível a maiúsculas**, e nunca existe rota genérica (`/{proxy+}`) nem rota para `/q/*`: uma rota
 genérica expõe health, métricas e OpenAPI. Tudo o que não está aqui recebe **404 do próprio Gateway**.
 
+São as 20 rotas de [`session/locals.tf`](session/locals.tf) mais o `POST /auth` de [`session/routes.tf`](session/routes.tf):
+
 | Serviço | Rotas |
 |---|---|
-| OS | `POST /carworkshop/v1/auth/login` · `ANY /carworkshop/v1/{customers,vehicles}/{proxy+}` · `ANY /carworkshop/v1/{service,parts-and-supplies,work-orders}` e `…/{proxy+}` · `GET /carworkshop/v1/tracking/{id}` |
-| Billing | `GET /billing/v1/info` |
-| Execution | `GET /execution/v1/info` |
+| Autenticação do cliente | `POST /auth` |
+| OS | `POST /carworkshop/v1/auth/login` · `ANY /carworkshop/v1/customers/{proxy+}` · `ANY /carworkshop/v1/vehicles/{proxy+}` · `ANY /carworkshop/v1/service` e `/service/{proxy+}` · `ANY /carworkshop/v1/parts-and-supplies` e `/parts-and-supplies/{proxy+}` · `ANY /carworkshop/v1/work-orders` e `/work-orders/{proxy+}` · `GET /carworkshop/v1/branches` · `GET /carworkshop/v1/tracking/{id}` |
+| Billing | `GET /billing/v1/info` · `GET /billing/v1/budgets` · `GET /billing/v1/budgets/{id}` · `POST /billing/v1/budgets/{id}/approve` · `POST /billing/v1/budgets/{id}/reject` · `POST /billing/v1/webhooks/mercadopago` |
+| Execution | `GET /execution/v1/info` · `GET /execution/v1/queue` · `ANY /execution/v1/work-orders/{proxy+}` |
 
 `/carworkshop/v1/auth/signup` **não** é publicado: criar administrador é ação de atendimento, não de cliente.
+`/carworkshop/v1/internal/*` também não: são rotas de serviço para serviço.
 
 A Lambda de CPF (`lambda/`, testada no CI) vive no `session/`, e a rota `POST /auth` aponta para ela.
 
@@ -76,6 +121,41 @@ Pago**.
 
 Apagar o HTTP API de propósito exige um PR que tire o `prevent_destroy` de
 [`persistent/apigateway.tf`](persistent/apigateway.tf); um `destroy` do `persistent/` sem isso falha.
+
+## Contrato no SSM
+
+| Lê | De quem | Onde |
+|---|---|---|
+| `/fase4/apigw/api-id` | o `persistent/` deste repositório | `session/` |
+| `/fase4/vpc/id`, `/fase4/vpc/cidr`, `/fase4/vpc/private-subnets`, `/fase4/alb/listener-arn`, `/fase4/alb/sg-id`, `/fase4/alb/dns` | plataforma ([fiap-fase4-infra-k8s](https://github.com/CleytonOngaratto/fiap-fase4-infra-k8s)) | `session/` |
+| `/fase4/jwt/private-key` | bootstrap manual (sobrevive ao teardown) | a Lambda, em runtime, pelo nome |
+| `/fase4/os/internal/service-token` | [fiap-fase4-os-service](https://github.com/CleytonOngaratto/fiap-fase4-os-service) | a Lambda, em runtime, pelo nome |
+| `/fase4/apigw/url` | o `persistent/` deste repositório | smoke do `terraform.yml` |
+
+| Publica | Conteúdo |
+|---|---|
+| `/fase4/apigw/api-id` | identificador do HTTP API, lido pelo `session/` |
+| `/fase4/apigw/url` | URL pública do Gateway: é o `baseUrl` das collections do Postman e a base da URL do webhook no painel do Mercado Pago |
+
+## Decisões (resumo)
+
+Detalhamento na documentação arquitetural,
+[`fiap-fase4-os-service/docs/arquitetura/`](https://github.com/CleytonOngaratto/fiap-fase4-os-service/tree/main/docs/arquitetura):
+[ADR-003 — borda privada](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-003-borda-privada.md),
+[ADR-004 — Gateway persistente](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-004-gateway-persistente.md) e
+[ADR-007 — Lambda sem o banco do OS](https://github.com/CleytonOngaratto/fiap-fase4-os-service/blob/main/docs/arquitetura/adr/ADR-007-lambda-sem-banco-do-os.md).
+
+| Decisão | Motivo |
+|---|---|
+| Dois roots de Terraform, `persistent/` e `session/` | a URL configurada no painel do Mercado Pago não pode mudar entre sessões |
+| `prevent_destroy` no HTTP API | apagar o API muda a URL; exige um PR que tire a trava |
+| Rotas em allowlist, por recurso | uma rota genérica expõe `/q/*`, e uma rota declarada sem integração não bloqueia nada (medido em 2026-10-01) |
+| A Lambda não acessa banco | confirma o cliente num endpoint interno do OS, com credencial de serviço; nenhum serviço lê o banco de outro |
+| Segredos lidos em runtime, pelo nome | um `data source` gravaria o valor decifrado no state, e uma variável de ambiente o mostraria no console |
+| Uma retentativa do `GET` interno antes do 503 | a primeira chamada depois de os pods serem reagendados estourou 3 s, e a seguinte levou 17 ms |
+| `lambda/**` no filtro de push do `terraform.yml` | o `archive_file` zipa a pasta: sem isso, um conserto na função seria mergeado e nunca publicado |
+| Log group explícito | sem ele, a função cria um com retenção infinita, que o `destroy` não remove |
+| Sem `reserved_concurrent_executions` | a AWS exige 100 de concorrência livre, e o teto do laboratório é 10 |
 
 ## CI
 
